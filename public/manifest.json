@@ -1,0 +1,21 @@
+{
+  "name": "Pokedex App",
+  "short_name": "Pokedex",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#DC0A2D",
+  "theme_color": "#DC0A2D",
+  "description": "PWA de Pokedex usando Vue",
+  "icons": [
+    {
+      "src": "/favicon.ico",
+      "sizes": "16x16 32x32 128x128 256x256",
+      "type": "image/x-icon"
+    },
+    {
+      "src": "/icon.png",
+      "type": "image/png",
+      "sizes": "512x512"
+    }
+  ]
+}
