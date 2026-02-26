@@ -163,3 +163,49 @@ self.addEventListener('sync', (event) => {
     event.waitUntil(sincronizarDatos);
   }
 });
+
+// ========================================================================
+// REQUISITO: NOTIFICACIONES PUSH EN EL SW
+// ========================================================================
+
+// Escuchamos el evento 'push' que nos envía nuestro servidor Express
+self.addEventListener('push', (event) => {
+  console.log('SW: Notificación Push recibida');
+
+  // Valores por defecto por si falla algo
+  let data = { titulo: 'Nueva Notificación', mensaje: 'Tienes una actualización en la Pokedex' };
+  
+  // Extraemos el JSON que enviamos desde el Backend (el payload)
+  if (event.data) {
+    data = event.data.json(); 
+  }
+
+  // Configuramos cómo se verá la notificación en el celular o PC
+  const opciones = {
+    body: data.mensaje,
+    icon: '/icon-192.png', // Tu icono del manifest
+    badge: '/icon-192.png', // Icono pequeño para la barra de estado
+    vibrate: [200, 100, 200], // Patrón de vibración
+    data: {
+      url: '/' // A dónde ir si el usuario hace clic en la notificación
+    }
+  };
+
+  // Mostramos la notificación usando la API del Service Worker
+  event.waitUntil(
+    self.registration.showNotification(data.titulo, opciones)
+  );
+});
+
+// Evento para cuando el usuario hace clic en la notificación
+self.addEventListener('notificationclick', (event) => {
+  const notificacion = event.notification;
+  const url = notificacion.data.url;
+
+  notificacion.close(); // Cerramos la notificación emergente
+
+  // Abrimos la app en la ruta que definimos
+  event.waitUntil(
+    clients.openWindow(url)
+  );
+});
