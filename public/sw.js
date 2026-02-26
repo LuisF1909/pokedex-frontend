@@ -1,84 +1,165 @@
-// ARCHIVO: pokedex/public/sw.js
-
-// 1. Nombres de las caches (versiones)
+// Nombres de las caches
 const APP_SHELL_CACHE = 'appShell_v1';
 const DYNAMIC_CACHE = 'dynamic_v1';
-
-// 2. Archivos fijos de la aplicación (APP SHELL)
-// Estos son los que se descargarán sí o sí al instalar.
 const APP_SHELL_FILES = [
   '/',
   '/index.html',
-  '/src/main.js',
-  '/src/App.vue',
-  // Agrega aquí los archivos que aparecían en tu foto si los tienes creados:
-  // '/src/pages/LoginPage.vue', 
-  // Nota: En Vite, los archivos .jsx o .vue se transforman, pero pondremos estos por ahora
-  // siguiendo tu ejemplo.
-  'https://api.iconify.design/ri.json?icons=moon-clear-fill' 
+  '/manifest.json'
 ];
 
-// EVENTO INSTALL: Se dispara cuando el navegador encuentra el SW por primera vez
+// --- EVENTOS DE INSTALACIÓN Y ACTIVACIÓN (Tu código anterior) ---
 self.addEventListener('install', (event) => {
-  console.log('SW: Instalando...');
-  
-  const cachePromise = caches.open(APP_SHELL_CACHE).then((cache) => {
-    // "Instala cache de APP SHELL"
-    return cache.addAll(APP_SHELL_FILES);
-  });
-
-  // "Activar nuevo SW automaticamente" (Parte 1: No esperar)
-  self.skipWaiting(); 
-  
+  const cachePromise = caches.open(APP_SHELL_CACHE).then(cache => cache.addAll(APP_SHELL_FILES));
+  self.skipWaiting();
   event.waitUntil(cachePromise);
 });
 
-// EVENTO ACTIVATE: Se dispara cuando el SW toma el control
 self.addEventListener('activate', (event) => {
-  console.log('SW: Activando y limpiando...');
-
-  const limpiarCache = caches.keys().then((keys) => {
-    return Promise.all(
-      keys.map((key) => {
-        // "Eliminar cache vieja"
-        // Si la cache no se llama igual a las nuevas versiones, bórrala.
-        if (key !== APP_SHELL_CACHE && key !== DYNAMIC_CACHE) {
-          return caches.delete(key);
-        }
-      })
-    );
-  });
-
+  const limpiarCache = caches.keys().then(keys => Promise.all(
+    keys.map(key => {
+      if (key !== APP_SHELL_CACHE && key !== DYNAMIC_CACHE) return caches.delete(key);
+    })
+  ));
   event.waitUntil(limpiarCache);
-  
-  // "Activar nuevo SW automaticamente" (Parte 2: Tomar control inmediato)
-  return self.clients.claim(); 
+  return self.clients.claim();
 });
 
-// EVENTO FETCH: Intercepta cada petición a internet
+// ========================================================================
+// REQUISITO 1: FUNCIONES PARA MANEJAR INDEXEDDB
+// ========================================================================
+
+// Abre (o crea) la base de datos IndexedDB
+function abrirBD() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open('PokedexOfflineDB', 1);
+    request.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      db.createObjectStore('peticionesFallidas', { keyPath: 'id', autoIncrement: true });
+    };
+    request.onsuccess = (e) => resolve(e.target.result);
+    request.onerror = (e) => reject(e.target.error);
+  });
+}
+
+// Guarda una petición fallida
+function guardarEnIndexedDB(url, method, body) {
+  return abrirBD().then(db => {
+    return new Promise((resolve, reject) => {
+      const transaccion = db.transaction('peticionesFallidas', 'readwrite');
+      const store = transaccion.objectStore('peticionesFallidas');
+      store.add({ url, method, body });
+      transaccion.oncomplete = () => resolve();
+      transaccion.onerror = () => reject();
+    });
+  });
+}
+
+// Obtiene todas las peticiones guardadas
+function obtenerDeIndexedDB() {
+  return abrirBD().then(db => {
+    return new Promise((resolve, reject) => {
+      const transaccion = db.transaction('peticionesFallidas', 'readonly');
+      const store = transaccion.objectStore('peticionesFallidas');
+      const request = store.getAll();
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  });
+}
+
+// Elimina una petición de la base de datos por su ID
+function eliminarDeIndexedDB(id) {
+  return abrirBD().then(db => {
+    return new Promise((resolve, reject) => {
+      const transaccion = db.transaction('peticionesFallidas', 'readwrite');
+      const store = transaccion.objectStore('peticionesFallidas');
+      store.delete(id);
+      transaccion.oncomplete = () => resolve();
+      transaccion.onerror = () => reject();
+    });
+  });
+}
+
+// ========================================================================
+// REQUISITO 2: INTERCEPTAR PETICIONES Y GENERAR TAREA ASÍNCRONA
+// ========================================================================
+
 self.addEventListener('fetch', (event) => {
   
-  // Solo nos interesan peticiones GET
-  if (event.request.method !== 'GET') return;
+  // A. SI ES UNA PETICIÓN QUE ENVÍA DATOS (POST, PUT, DELETE)
+  if (event.request.method !== 'GET') {
+    const respuestaOffline = fetch(event.request.clone())
+      .catch((error) => {
+        // "Cuando una peticion HTTP no se ejecute correctamente por falta de conexion"
+        return event.request.clone().text().then((bodyString) => {
+          
+          // "guarde en indexedDB"
+          return guardarEnIndexedDB(event.request.url, event.request.method, bodyString);
+          
+        }).then(() => {
+          
+          // "genere tarea asíncrona" (Background Sync)
+          return self.registration.sync.register('sync-peticiones-offline');
+          
+        }).then(() => {
+          // Devolvemos una respuesta falsa para que la app no colapse
+          return new Response(JSON.stringify({ offline: true, mensaje: "Guardado localmente. Se sincronizará al recuperar internet." }), {
+            headers: { 'Content-Type': 'application/json' }
+          });
+        });
+      });
 
-  const respuesta = fetch(event.request)
+    event.respondWith(respuestaOffline);
+    return; // Importante para que no siga con el código de abajo
+  }
+
+  // B. SI ES UNA PETICIÓN GET (Para mostrar páginas y datos - Tu código anterior)
+  const respuestaGET = fetch(event.request)
     .then((newResp) => {
-      // SI HAY INTERNET:
-      
-      // Si la respuesta es válida, la guardamos en el cache dinámico
-      // "Carga cache dinámico"
       return caches.open(DYNAMIC_CACHE).then((cache) => {
         cache.put(event.request, newResp.clone());
         return newResp;
       });
     })
     .catch((err) => {
-      // SI NO HAY INTERNET (OFFLINE):
-      
-      // "Carga desde cache las peticiones offline"
-      console.log('SW: Offline activado, buscando en cache...');
       return caches.match(event.request);
     });
 
-  event.respondWith(respuesta);
+  event.respondWith(respuestaGET);
+});
+
+// ========================================================================
+// REQUISITO 3: LISTENER SYNC (Ejecuta y elimina)
+// ========================================================================
+
+// "En el SW, crear un listener sync que ejecute peticiones HTTP guardados"
+self.addEventListener('sync', (event) => {
+  console.log('SW: Evento Sync detectado:', event.tag);
+  
+  if (event.tag === 'sync-peticiones-offline') {
+    const sincronizarDatos = obtenerDeIndexedDB().then((peticiones) => {
+      
+      // Recorremos todas las peticiones guardadas
+      return Promise.all(peticiones.map((pet) => {
+        
+        // Las enviamos de nuevo a internet
+        return fetch(pet.url, {
+          method: pet.method,
+          headers: { 'Content-Type': 'application/json' },
+          body: pet.body
+        }).then((respuestaServidor) => {
+          
+          if (respuestaServidor.ok) {
+            // "y los elimine" (Si se envió bien, la borramos de IndexedDB)
+            console.log('SW: Petición sincronizada con éxito!', pet.url);
+            return eliminarDeIndexedDB(pet.id);
+          }
+          
+        }).catch(err => console.log('SW: Aún no hay internet para sincronizar', err));
+      }));
+    });
+
+    // event.waitUntil asegura que el Service Worker no se apague hasta terminar
+    event.waitUntil(sincronizarDatos);
+  }
 });
