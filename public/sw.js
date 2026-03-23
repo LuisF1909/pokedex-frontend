@@ -183,8 +183,8 @@ self.addEventListener('push', (event) => {
   // Configuramos cómo se verá la notificación en el celular o PC
   const opciones = {
     body: data.mensaje,
-    icon: '/icon-192.png', // Tu icono del manifest
-    badge: '/icon-192.png', // Icono pequeño para la barra de estado
+    icon: '/icon.png', // Tu icono del manifest
+    badge: '/icon.png', // Icono pequeño para la barra de estado
     vibrate: [200, 100, 200], // Patrón de vibración
     data: {
       url: '/' // A dónde ir si el usuario hace clic en la notificación
