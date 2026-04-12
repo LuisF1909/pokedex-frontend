@@ -49,8 +49,9 @@ if ('serviceWorker' in navigator) {
           });
 
           // Enviar suscripción al backend (con token JWT para guardarla en BD)
+          const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:3000';
           const token = localStorage.getItem('token');
-          await fetch('http://localhost:3000/api/subscribe', {
+          await fetch(`${apiUrl}/api/subscribe`, {
             method: 'POST',
             body: JSON.stringify(subscription),
             headers: {

@@ -1,10 +1,13 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import api from '@/services/api'
 import PokemonPicker from '@/components/PokemonPicker.vue'
+import { connectSocket, getSocket } from '@/services/socket'
 
 const authStore = useAuthStore()
+const router = useRouter()
 const activeTab = ref('favorites')
 
 // --- FAVORITOS ---
@@ -171,246 +174,119 @@ const addFriend = async () => {
   }
 }
 
-// --- BATALLAS INTERACTIVAS ---
-const battleStep = ref('select-team') // select-team, select-friend, select-opponent-team, loading, battle, result
+// --- BATALLAS EN TIEMPO REAL ---
+const battleStep = ref('select-team') // select-team, select-friend, waiting, loading
 const selectedMyTeam = ref(null)
 const selectedFriend = ref(null)
-const opponentTeams = ref([])
-const selectedOpponentTeam = ref(null)
 const battleError = ref('')
-const loadingOpTeams = ref(false)
+const battleMsg = ref('')
 
-// Estado de combate
-const battleData = ref(null)
-const myActivePokemon = ref(0)
-const opActivePokemon = ref(0)
-const myTeamHP = ref([])
-const opTeamHP = ref([])
-const battleLog = ref([])
-const battleOver = ref(false)
-const battleWinner = ref('')
-const animatingAttack = ref(false)
-const lastAction = ref(null)
+// Invitación recibida
+const pendingInvitation = ref(null)
+const showInvitationModal = ref(false)
+const acceptTeamId = ref(null)
 
-const TYPE_CHART = {
-  normal:   { rock: 0.5, ghost: 0, steel: 0.5 },
-  fire:     { fire: 0.5, water: 0.5, grass: 2, ice: 2, bug: 2, rock: 0.5, dragon: 0.5, steel: 2 },
-  water:    { fire: 2, water: 0.5, grass: 0.5, ground: 2, rock: 2, dragon: 0.5 },
-  electric: { water: 2, electric: 0.5, grass: 0.5, ground: 0, flying: 2, dragon: 0.5 },
-  grass:    { fire: 0.5, water: 2, grass: 0.5, poison: 0.5, ground: 2, flying: 0.5, bug: 0.5, rock: 2, dragon: 0.5, steel: 0.5 },
-  ice:      { fire: 0.5, water: 0.5, grass: 2, ice: 0.5, ground: 2, flying: 2, dragon: 2, steel: 0.5 },
-  fighting: { normal: 2, ice: 2, poison: 0.5, flying: 0.5, psychic: 0.5, bug: 0.5, rock: 2, ghost: 0, dark: 2, steel: 2, fairy: 0.5 },
-  poison:   { grass: 2, poison: 0.5, ground: 0.5, rock: 0.5, ghost: 0.5, steel: 0, fairy: 2 },
-  ground:   { fire: 2, electric: 2, grass: 0.5, poison: 2, flying: 0, bug: 0.5, rock: 2, steel: 2 },
-  flying:   { electric: 0.5, grass: 2, fighting: 2, bug: 2, rock: 0.5, steel: 0.5 },
-  psychic:  { fighting: 2, poison: 2, psychic: 0.5, dark: 0, steel: 0.5 },
-  bug:      { fire: 0.5, grass: 2, fighting: 0.5, poison: 0.5, flying: 0.5, psychic: 2, ghost: 0.5, dark: 2, steel: 0.5, fairy: 0.5 },
-  rock:     { fire: 2, ice: 2, fighting: 0.5, ground: 0.5, flying: 2, bug: 2, steel: 0.5 },
-  ghost:    { normal: 0, psychic: 2, ghost: 2, dark: 0.5 },
-  dragon:   { dragon: 2, steel: 0.5, fairy: 0 },
-  dark:     { fighting: 0.5, psychic: 2, ghost: 2, dark: 0.5, fairy: 0.5 },
-  steel:    { fire: 0.5, water: 0.5, electric: 0.5, ice: 2, rock: 2, steel: 0.5, fairy: 2 },
-  fairy:    { fire: 0.5, fighting: 2, poison: 0.5, dragon: 2, dark: 2, steel: 0.5 }
-}
-
-const getTypeEffectiveness = (attackType, defenseTypes) => {
-  let multiplier = 1
-  for (const defType of defenseTypes) {
-    const chart = TYPE_CHART[attackType]
-    if (chart && chart[defType] !== undefined) {
-      multiplier *= chart[defType]
-    }
-  }
-  return multiplier
-}
-
-const calcDamage = (attacker, defender, move) => {
-  const attackType = move.type
-  const effectiveness = getTypeEffectiveness(attackType, defender.types)
-  const level = 50
-  const power = move.power
-  const isSpecial = move.damageClass === 'special'
-  const atkStat = isSpecial ? attacker.stats['special-attack'] : attacker.stats['attack']
-  const defStat = isSpecial ? defender.stats['special-defense'] : defender.stats['defense']
-  const stab = attacker.types.includes(attackType) ? 1.5 : 1
-  const random = Math.random() * 0.15 + 0.85
-
-  // Precisión
-  if (Math.random() * 100 > (move.accuracy || 100)) {
-    return { damage: 0, effectiveness, missed: true }
-  }
-
-  const damage = Math.floor(
-    (((2 * level / 5 + 2) * power * atkStat / defStat) / 50 + 2) * stab * effectiveness * random
-  )
-  return { damage: Math.max(1, damage), effectiveness, missed: false }
-}
+let socket = null
 
 const selectTeamForBattle = (team) => {
   selectedMyTeam.value = team
   battleStep.value = 'select-friend'
 }
 
-const selectFriendForBattle = async (friend) => {
+const selectFriendForBattle = (friend) => {
   selectedFriend.value = friend
-  loadingOpTeams.value = true
   battleError.value = ''
-  try {
-    const res = await api.get(`/social/teams/user/${friend.id}`)
-    opponentTeams.value = res.data
-    if (opponentTeams.value.length === 0) {
-      battleError.value = 'Este amigo no tiene equipos creados.'
-    } else {
-      battleStep.value = 'select-opponent-team'
-    }
-  } catch (err) {
-    battleError.value = err.response?.data?.error || 'Error obteniendo equipos del oponente'
-  } finally {
-    loadingOpTeams.value = false
-  }
-}
+  battleMsg.value = ''
+  battleStep.value = 'waiting'
 
-const prepareBattle = async (opTeam) => {
-  selectedOpponentTeam.value = opTeam
-  battleStep.value = 'loading'
-  battleError.value = ''
-  try {
-    const res = await api.post('/social/battles/prepare', {
-      friend_id: selectedFriend.value.id,
-      my_team_id: selectedMyTeam.value.id,
-      opponent_team_id: opTeam.id
-    })
-    battleData.value = res.data
-    myActivePokemon.value = 0
-    opActivePokemon.value = 0
-    myTeamHP.value = res.data.myPokemon.map(p => p.stats.hp)
-    opTeamHP.value = res.data.opponentPokemon.map(p => p.stats.hp)
-    battleLog.value = []
-    battleOver.value = false
-    battleWinner.value = ''
-    lastAction.value = null
-    battleStep.value = 'battle'
-  } catch (err) {
-    battleError.value = err.response?.data?.error || 'Error preparando la batalla'
-    battleStep.value = 'select-opponent-team'
-  }
-}
-
-const addLog = (msg, type = 'normal') => {
-  battleLog.value.push({ msg, type })
-}
-
-const executePlayerMove = async (move) => {
-  if (animatingAttack.value || battleOver.value) return
-  animatingAttack.value = true
-
-  const myPoke = battleData.value.myPokemon[myActivePokemon.value]
-  const opPoke = battleData.value.opponentPokemon[opActivePokemon.value]
-
-  // Determinar orden por velocidad
-  const mySpeed = myPoke.stats.speed
-  const opSpeed = opPoke.stats.speed
-  const playerFirst = mySpeed >= opSpeed
-
-  // Oponente elige movimiento random
-  const opMove = opPoke.moves[Math.floor(Math.random() * opPoke.moves.length)]
-
-  if (playerFirst) {
-    await doAttack(myPoke, opPoke, move, true)
-    if (!battleOver.value && opTeamHP.value[opActivePokemon.value] > 0) {
-      await delay(800)
-      await doAttack(opPoke, myPoke, opMove, false)
-    }
-  } else {
-    await doAttack(opPoke, myPoke, opMove, false)
-    if (!battleOver.value && myTeamHP.value[myActivePokemon.value] > 0) {
-      await delay(800)
-      await doAttack(myPoke, opPoke, move, true)
-    }
-  }
-
-  animatingAttack.value = false
-}
-
-const delay = (ms) => new Promise(r => setTimeout(r, ms))
-
-const doAttack = async (attacker, defender, move, isPlayer) => {
-  const result = calcDamage(attacker, defender, move)
-
-  const attackerName = capitalize(attacker.name)
-  const defenderName = capitalize(defender.name)
-
-  if (result.missed) {
-    addLog(`${attackerName} usó ${move.name} pero ¡falló!`, 'miss')
-    lastAction.value = { attacker: attackerName, move: move.name, missed: true }
-    await delay(600)
+  socket = getSocket()
+  if (!socket || !socket.connected) {
+    battleError.value = 'No hay conexión al servidor. Recarga la página.'
+    battleStep.value = 'select-friend'
     return
   }
 
-  // Aplicar daño
-  if (isPlayer) {
-    opTeamHP.value[opActivePokemon.value] = Math.max(0, opTeamHP.value[opActivePokemon.value] - result.damage)
-  } else {
-    myTeamHP.value[myActivePokemon.value] = Math.max(0, myTeamHP.value[myActivePokemon.value] - result.damage)
+  // Enviar reto
+  socket.emit('challenge-friend', {
+    friendId: friend.id,
+    myTeamId: selectedMyTeam.value.id
+  })
+}
+
+const setupSocketListeners = () => {
+  socket = getSocket()
+  if (!socket) return
+
+  socket.on('challenge-sent', (data) => {
+    battleMsg.value = data.message
+  })
+
+  socket.on('challenge-rejected', (data) => {
+    battleError.value = data.message
+    battleStep.value = 'select-friend'
+    battleMsg.value = ''
+  })
+
+  socket.on('battle-invitation', (data) => {
+    pendingInvitation.value = data
+    showInvitationModal.value = true
+  })
+
+  socket.on('battle-loading', () => {
+    battleStep.value = 'loading'
+    battleMsg.value = 'Cargando datos de los Pokémon...'
+  })
+
+  socket.on('battle-start', (data) => {
+    // Redirigir a la arena de batalla
+    router.push(`/battle/${data.battleId}`)
+  })
+
+  socket.on('error-msg', (data) => {
+    battleError.value = data.message
+    if (battleStep.value === 'waiting' || battleStep.value === 'loading') {
+      battleStep.value = 'select-friend'
+    }
+  })
+}
+
+const acceptInvitation = () => {
+  if (!pendingInvitation.value || !acceptTeamId.value) return
+
+  socket = getSocket()
+  if (!socket) return
+
+  socket.emit('accept-challenge', {
+    challengeId: pendingInvitation.value.challengeId,
+    myTeamId: acceptTeamId.value
+  })
+
+  showInvitationModal.value = false
+  battleStep.value = 'loading'
+  battleMsg.value = 'Cargando batalla...'
+}
+
+const rejectInvitation = () => {
+  if (!pendingInvitation.value) return
+
+  socket = getSocket()
+  if (socket) {
+    socket.emit('reject-challenge', {
+      challengeId: pendingInvitation.value.challengeId
+    })
   }
 
-  let effText = ''
-  if (result.effectiveness >= 2) effText = ' ¡Super efectivo!'
-  else if (result.effectiveness > 0 && result.effectiveness < 1) effText = ' No muy efectivo...'
-  else if (result.effectiveness === 0) effText = ' No afecta.'
-
-  const logType = result.effectiveness >= 2 ? 'super' : result.effectiveness < 1 ? 'weak' : 'normal'
-  addLog(`${attackerName} usó ${move.name} → ${result.damage} daño a ${defenderName}.${effText}`, logType)
-
-  lastAction.value = { attacker: attackerName, move: move.name, damage: result.damage, effectiveness: result.effectiveness }
-  await delay(600)
-
-  // Verificar si el defensor fue derrotado
-  if (isPlayer && opTeamHP.value[opActivePokemon.value] <= 0) {
-    addLog(`💀 ${defenderName} fue derrotado!`, 'fainted')
-    await delay(500)
-    if (opActivePokemon.value + 1 < battleData.value.opponentPokemon.length) {
-      opActivePokemon.value++
-      addLog(`El oponente envía a ${capitalize(battleData.value.opponentPokemon[opActivePokemon.value].name)}!`, 'switch')
-    } else {
-      battleOver.value = true
-      battleWinner.value = 'Tú'
-      battleStep.value = 'result'
-    }
-  } else if (!isPlayer && myTeamHP.value[myActivePokemon.value] <= 0) {
-    addLog(`💀 ${defenderName} fue derrotado!`, 'fainted')
-    await delay(500)
-    if (myActivePokemon.value + 1 < battleData.value.myPokemon.length) {
-      myActivePokemon.value++
-      addLog(`¡Adelante, ${capitalize(battleData.value.myPokemon[myActivePokemon.value].name)}!`, 'switch')
-    } else {
-      battleOver.value = true
-      battleWinner.value = 'Oponente'
-      battleStep.value = 'result'
-    }
-  }
+  showInvitationModal.value = false
+  pendingInvitation.value = null
+  acceptTeamId.value = null
 }
 
 const resetBattle = () => {
   battleStep.value = 'select-team'
   selectedMyTeam.value = null
   selectedFriend.value = null
-  selectedOpponentTeam.value = null
-  opponentTeams.value = []
-  battleData.value = null
-  battleLog.value = []
-  battleOver.value = false
-  battleWinner.value = ''
   battleError.value = ''
-  lastAction.value = null
-}
-
-const hpPercentage = (current, max) => Math.max(0, Math.round((current / max) * 100))
-
-const hpBarClass = (pct) => {
-  if (pct > 50) return 'hp-green'
-  if (pct > 20) return 'hp-yellow'
-  return 'hp-red'
+  battleMsg.value = ''
 }
 
 const switchTab = (tab) => {
@@ -430,7 +306,26 @@ const capitalize = (str) => str.charAt(0).toUpperCase() + str.slice(1)
 const pokemonImage = (id) =>
   `https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/${id}.png`
 
-onMounted(() => fetchFavorites())
+onMounted(() => {
+  fetchFavorites()
+  // Conectar socket y escuchar eventos
+  connectSocket()
+  // Pequeño delay para asegurar que el socket esté listo
+  setTimeout(() => {
+    setupSocketListeners()
+  }, 500)
+})
+
+onUnmounted(() => {
+  if (socket) {
+    socket.off('challenge-sent')
+    socket.off('challenge-rejected')
+    socket.off('battle-invitation')
+    socket.off('battle-loading')
+    socket.off('battle-start')
+    socket.off('error-msg')
+  }
+})
 </script>
 
 <template>
@@ -571,9 +466,10 @@ onMounted(() => fetchFavorites())
         </div>
       </div>
 
-      <!-- BATALLAS -->
+      <!-- BATALLAS EN TIEMPO REAL -->
       <div v-if="activeTab === 'battles'">
         <div v-if="battleError" class="alert alert-error" style="margin-bottom:12px;">{{ battleError }}</div>
+        <div v-if="battleMsg" class="alert alert-success" style="margin-bottom:12px;">{{ battleMsg }}</div>
 
         <!-- Step 1: Select team -->
         <div v-if="battleStep === 'select-team'">
@@ -589,10 +485,11 @@ onMounted(() => fetchFavorites())
           </div>
         </div>
 
-        <!-- Step 2: Select friend -->
+        <!-- Step 2: Select friend to challenge -->
         <div v-if="battleStep === 'select-friend'">
-          <h2 class="battle-step-title">2. Elige a tu rival</h2>
+          <h2 class="battle-step-title">2. Reta a un amigo</h2>
           <p class="battle-step-sub">Tu equipo: <strong>{{ selectedMyTeam?.name }}</strong></p>
+          <p class="battle-step-sub" style="font-size:0.8rem; color: var(--text-muted);">Tu amigo debe estar conectado para recibir el reto</p>
           <div v-if="friends.length === 0" class="empty-state"><p>Necesitas amigos para batallar</p></div>
           <div v-else class="friends-list">
             <div v-for="friend in friends" :key="friend.id" class="card friend-card battle-friend-card" @click="selectFriendForBattle(friend)">
@@ -601,132 +498,59 @@ onMounted(() => fetchFavorites())
                 <h3>{{ friend.email }}</h3>
                 <span class="friend-code-sm">{{ friend.friend_code }}</span>
               </div>
-              <span class="battle-select-arrow">→</span>
+              <span class="battle-select-arrow">⚔️</span>
             </div>
           </div>
           <button @click="resetBattle" class="btn btn-secondary btn-sm" style="margin-top:16px;">← Volver</button>
         </div>
 
-        <!-- Step 3: Select opponent team -->
-        <div v-if="battleStep === 'select-opponent-team'">
-          <h2 class="battle-step-title">3. Elige el equipo rival</h2>
-          <p class="battle-step-sub">Tú: <strong>{{ selectedMyTeam?.name }}</strong> vs <strong>{{ selectedFriend?.email }}</strong></p>
-          <div v-if="loadingOpTeams" class="loading-center"><div class="spinner"></div></div>
-          <div v-else class="battle-select-grid">
-            <div v-for="opTeam in opponentTeams" :key="opTeam.id" class="card battle-select-card" @click="prepareBattle(opTeam)">
-              <h3>{{ opTeam.name }}</h3>
-              <div class="team-pokemon-mini">
-                <img v-for="pid in opTeam.pokemon_ids" :key="pid" :src="pokemonImage(pid)" :alt="'#'+pid" />
-              </div>
-            </div>
-          </div>
-          <button @click="battleStep = 'select-friend'" class="btn btn-secondary btn-sm" style="margin-top:16px;">← Volver</button>
-        </div>
-
-        <!-- Loading -->
-        <div v-if="battleStep === 'loading'" class="loading-center">
+        <!-- Waiting for opponent response -->
+        <div v-if="battleStep === 'waiting'" class="battle-waiting-screen">
           <div class="spinner"></div>
-          <p style="margin-top:12px; color: var(--text-secondary);">Cargando datos de batalla...</p>
+          <h3>Esperando respuesta...</h3>
+          <p>Reto enviado a <strong>{{ selectedFriend?.email }}</strong></p>
+          <p style="font-size:0.8rem; color: var(--text-muted);">Tu amigo debe aceptar el reto para comenzar la batalla</p>
+          <button @click="resetBattle" class="btn btn-secondary btn-sm" style="margin-top:20px;">Cancelar</button>
         </div>
 
-        <!-- ========== BATTLE ARENA ========== -->
-        <div v-if="battleStep === 'battle' && battleData" class="battle-arena fade-in">
+        <!-- Loading battle data -->
+        <div v-if="battleStep === 'loading'" class="battle-waiting-screen">
+          <div class="spinner"></div>
+          <h3>Preparando la batalla...</h3>
+          <p>Cargando datos de los Pokémon</p>
+        </div>
+      </div>
 
-          <!-- Opponent side -->
-          <div class="battle-side opponent-side">
-            <div class="battle-poke-info">
-              <span class="battle-poke-name">{{ capitalize(battleData.opponentPokemon[opActivePokemon].name) }}</span>
-              <div class="battle-poke-types">
-                <span v-for="t in battleData.opponentPokemon[opActivePokemon].types" :key="t" :class="['type-badge type-sm', `type-${t}`]">{{ capitalize(t) }}</span>
-              </div>
-              <div class="hp-bar-wrap">
-                <div class="hp-bar-track">
-                  <div
-                    :class="['hp-bar-fill', hpBarClass(hpPercentage(opTeamHP[opActivePokemon], battleData.opponentPokemon[opActivePokemon].stats.hp))]"
-                    :style="{ width: hpPercentage(opTeamHP[opActivePokemon], battleData.opponentPokemon[opActivePokemon].stats.hp) + '%' }"
-                  ></div>
-                </div>
-                <span class="hp-text">{{ opTeamHP[opActivePokemon] }} / {{ battleData.opponentPokemon[opActivePokemon].stats.hp }}</span>
-              </div>
-              <!-- Team icons -->
-              <div class="battle-team-icons">
-                <span v-for="(p, i) in battleData.opponentPokemon" :key="p.id" :class="['team-dot', { active: i === opActivePokemon, fainted: opTeamHP[i] <= 0 }]">●</span>
-              </div>
-            </div>
-            <div class="battle-poke-sprite opponent-sprite" :class="{ 'shake-hit': lastAction && !lastAction.missed && lastAction.attacker !== capitalize(battleData.opponentPokemon[opActivePokemon].name) }">
-              <img :src="battleData.opponentPokemon[opActivePokemon].image" :alt="battleData.opponentPokemon[opActivePokemon].name" />
-            </div>
-          </div>
+      <!-- MODAL: Invitación de batalla recibida -->
+      <div v-if="showInvitationModal" class="battle-modal-overlay" @click.self="rejectInvitation">
+        <div class="battle-modal">
+          <h2>⚔️ ¡Te han retado!</h2>
+          <p><strong>{{ pendingInvitation?.challengerEmail }}</strong> quiere batallar contra ti.</p>
 
-          <!-- Player side -->
-          <div class="battle-side player-side">
-            <div class="battle-poke-sprite player-sprite" :class="{ 'shake-hit': lastAction && !lastAction.missed && lastAction.attacker !== capitalize(battleData.myPokemon[myActivePokemon].name) }">
-              <img :src="battleData.myPokemon[myActivePokemon].image" :alt="battleData.myPokemon[myActivePokemon].name" />
-            </div>
-            <div class="battle-poke-info">
-              <span class="battle-poke-name">{{ capitalize(battleData.myPokemon[myActivePokemon].name) }}</span>
-              <div class="battle-poke-types">
-                <span v-for="t in battleData.myPokemon[myActivePokemon].types" :key="t" :class="['type-badge type-sm', `type-${t}`]">{{ capitalize(t) }}</span>
-              </div>
-              <div class="hp-bar-wrap">
-                <div class="hp-bar-track">
-                  <div
-                    :class="['hp-bar-fill', hpBarClass(hpPercentage(myTeamHP[myActivePokemon], battleData.myPokemon[myActivePokemon].stats.hp))]"
-                    :style="{ width: hpPercentage(myTeamHP[myActivePokemon], battleData.myPokemon[myActivePokemon].stats.hp) + '%' }"
-                  ></div>
-                </div>
-                <span class="hp-text">{{ myTeamHP[myActivePokemon] }} / {{ battleData.myPokemon[myActivePokemon].stats.hp }}</span>
-              </div>
-              <div class="battle-team-icons">
-                <span v-for="(p, i) in battleData.myPokemon" :key="p.id" :class="['team-dot', { active: i === myActivePokemon, fainted: myTeamHP[i] <= 0 }]">●</span>
-              </div>
-            </div>
-          </div>
-
-          <!-- Move buttons -->
-          <div class="battle-moves">
-            <h3>¿Qué movimiento usar?</h3>
-            <div class="moves-grid">
-              <button
-                v-for="move in battleData.myPokemon[myActivePokemon].moves"
-                :key="move.internalName"
-                :class="['move-btn', `type-bg-${move.type}`]"
-                :disabled="animatingAttack"
-                @click="executePlayerMove(move)"
+          <div v-if="teams.length > 0" style="margin-top:16px;">
+            <label class="form-label">Elige tu equipo:</label>
+            <div class="battle-select-grid" style="margin-top:8px;">
+              <div
+                v-for="team in teams"
+                :key="team.id"
+                :class="['card', 'battle-select-card', { 'battle-card-selected': acceptTeamId === team.id }]"
+                @click="acceptTeamId = team.id"
               >
-                <span class="move-name">{{ move.name }}</span>
-                <div class="move-details">
-                  <span :class="['type-badge type-xs', `type-${move.type}`]">{{ capitalize(move.type) }}</span>
-                  <span class="move-power">PWR {{ move.power }}</span>
-                  <span class="move-class">{{ move.damageClass === 'special' ? '💫' : '💪' }}</span>
+                <h3>{{ team.name }}</h3>
+                <div class="team-pokemon-mini">
+                  <img v-for="pid in team.pokemon_ids" :key="pid" :src="pokemonImage(pid)" :alt="'#'+pid" />
                 </div>
-              </button>
+              </div>
             </div>
           </div>
-
-          <!-- Battle log -->
-          <div class="battle-log-mini" ref="logRef">
-            <div v-for="(entry, i) in battleLog.slice(-6)" :key="i" :class="['log-entry', `log-${entry.type}`]">
-              {{ entry.msg }}
-            </div>
-          </div>
-        </div>
-
-        <!-- RESULT -->
-        <div v-if="battleStep === 'result'" class="battle-result fade-in">
-          <div :class="['battle-winner-banner', battleWinner === 'Tú' ? 'winner-you' : 'winner-opponent']">
-            <h2>{{ battleWinner === 'Tú' ? '🎉 ¡Victoria!' : '💀 Derrota' }}</h2>
-            <p>{{ battleData?.myTeamName }} vs {{ battleData?.opponentTeamName }}</p>
+          <div v-else class="empty-state" style="margin-top:16px;">
+            <p>No tienes equipos para batallar</p>
           </div>
 
-          <div class="battle-log-full">
-            <h3>Registro completo</h3>
-            <div v-for="(entry, i) in battleLog" :key="i" :class="['log-entry', `log-${entry.type}`]">
-              {{ entry.msg }}
-            </div>
+          <div class="battle-modal-actions">
+            <button @click="acceptInvitation" class="btn btn-accent" :disabled="!acceptTeamId">✅ Aceptar</button>
+            <button @click="rejectInvitation" class="btn btn-secondary">❌ Rechazar</button>
           </div>
-
-          <button @click="resetBattle" class="btn btn-accent" style="margin-top:20px;">🔄 Nueva Batalla</button>
         </div>
       </div>
 
@@ -1030,5 +854,76 @@ onMounted(() => fetchFavorites())
   .battle-poke-sprite { width: 100px; height: 100px; }
   .battle-poke-sprite img { width: 90px; height: 90px; }
   .moves-grid { grid-template-columns: 1fr; }
+}
+
+/* Real-time battle styles */
+.battle-waiting-screen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+  text-align: center;
+  gap: 12px;
+  padding: 40px 20px;
+}
+.battle-waiting-screen h3 {
+  font-size: 1.1rem;
+  color: var(--text-primary);
+}
+.battle-waiting-screen p {
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+}
+
+.battle-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 20px;
+}
+.battle-modal {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius-xl);
+  padding: 28px;
+  max-width: 440px;
+  width: 100%;
+  max-height: 80vh;
+  overflow-y: auto;
+  animation: modalSlideIn 0.3s ease;
+}
+@keyframes modalSlideIn {
+  from { transform: translateY(20px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+.battle-modal h2 {
+  font-size: 1.3rem;
+  margin-bottom: 8px;
+  text-align: center;
+}
+.battle-modal > p {
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 0.95rem;
+}
+.battle-modal-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  margin-top: 20px;
+}
+
+.battle-card-selected {
+  border-color: var(--accent-gold) !important;
+  box-shadow: 0 0 0 2px var(--accent-gold), 0 4px 16px rgba(255, 215, 0, 0.15);
 }
 </style>

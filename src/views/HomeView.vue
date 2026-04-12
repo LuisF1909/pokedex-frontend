@@ -8,7 +8,8 @@ const router = useRouter()
 const allPokemon = ref([])
 const loading = ref(true)
 const searchQuery = ref('')
-const selectedType = ref('')
+const selectedType1 = ref('')
+const selectedType2 = ref('')
 const selectedRegion = ref('')
 const offset = ref(0)
 const totalCount = ref(0)
@@ -33,6 +34,12 @@ const regions = [
   { value: 'paldea', label: 'Paldea (Gen 9)' }
 ]
 
+// Tipos disponibles para el segundo filtro (excluir el tipo 1 seleccionado)
+const availableType2Options = computed(() => {
+  if (!selectedType1.value) return []
+  return pokemonTypes.filter(t => t !== selectedType1.value)
+})
+
 const fetchPokemon = async (isLoadMore = false) => {
   if (isLoadMore) {
     loadingMore.value = true
@@ -46,9 +53,13 @@ const fetchPokemon = async (isLoadMore = false) => {
       const res = await api.get(`/pokemon/filter/region/${selectedRegion.value}`)
       allPokemon.value = res.data.results
       totalCount.value = res.data.results.length
-    } else if (selectedType.value) {
-      // Filter by type
-      const res = await api.get(`/pokemon/filter/type/${selectedType.value}`)
+    } else if (selectedType1.value) {
+      // Filter by type(s)?type1=X&type2=Y
+      let url = `/pokemon/filter/types?type1=${selectedType1.value}`
+      if (selectedType2.value) {
+        url += `&type2=${selectedType2.value}`
+      }
+      const res = await api.get(url)
       allPokemon.value = res.data.results
       totalCount.value = res.data.results.length
     } else {
@@ -75,7 +86,7 @@ const filteredPokemon = computed(() => {
 })
 
 const canLoadMore = computed(() => {
-  return !selectedType.value && !selectedRegion.value && allPokemon.value.length < totalCount.value
+  return !selectedType1.value && !selectedRegion.value && allPokemon.value.length < totalCount.value
 })
 
 const loadMore = () => {
@@ -83,15 +94,23 @@ const loadMore = () => {
   fetchPokemon(true)
 }
 
-const onTypeChange = () => {
+const onType1Change = () => {
   selectedRegion.value = ''
+  selectedType2.value = ''
+  offset.value = 0
+  allPokemon.value = []
+  fetchPokemon()
+}
+
+const onType2Change = () => {
   offset.value = 0
   allPokemon.value = []
   fetchPokemon()
 }
 
 const onRegionChange = () => {
-  selectedType.value = ''
+  selectedType1.value = ''
+  selectedType2.value = ''
   offset.value = 0
   allPokemon.value = []
   fetchPokemon()
@@ -99,7 +118,8 @@ const onRegionChange = () => {
 
 const clearFilters = () => {
   searchQuery.value = ''
-  selectedType.value = ''
+  selectedType1.value = ''
+  selectedType2.value = ''
   selectedRegion.value = ''
   offset.value = 0
   allPokemon.value = []
@@ -130,21 +150,47 @@ onMounted(() => fetchPokemon())
       </div>
 
       <div class="filter-row">
-        <select v-model="selectedType" @change="onTypeChange" class="form-select">
-          <option value="">Todos los tipos</option>
+        <select v-model="selectedType1" @change="onType1Change" class="form-select" id="filter-type1">
+          <option value="">Tipo 1</option>
           <option v-for="t in pokemonTypes" :key="t" :value="t">
             {{ capitalize(t) }}
           </option>
         </select>
-        <select v-model="selectedRegion" @change="onRegionChange" class="form-select">
-          <option value="">Todas las regiones</option>
+        <select
+          v-model="selectedType2"
+          @change="onType2Change"
+          class="form-select"
+          id="filter-type2"
+          :disabled="!selectedType1"
+        >
+          <option value="">Tipo 2 (opcional)</option>
+          <option v-for="t in availableType2Options" :key="t" :value="t">
+            {{ capitalize(t) }}
+          </option>
+        </select>
+        <select v-model="selectedRegion" @change="onRegionChange" class="form-select" id="filter-region">
+          <option value="">Región</option>
           <option v-for="r in regions" :key="r.value" :value="r.value">
             {{ r.label }}
           </option>
         </select>
-        <button v-if="selectedType || searchQuery || selectedRegion" @click="clearFilters" class="btn btn-secondary btn-sm">
+        <button v-if="selectedType1 || searchQuery || selectedRegion" @click="clearFilters" class="btn btn-secondary btn-sm">
           ✕ Limpiar
         </button>
+      </div>
+
+      <!-- Active filters display -->
+      <div v-if="selectedType1 || selectedRegion" class="active-filters">
+        <span v-if="selectedType1" :class="['type-badge', `type-${selectedType1}`]">
+          {{ capitalize(selectedType1) }}
+        </span>
+        <span v-if="selectedType2" class="filter-plus">+</span>
+        <span v-if="selectedType2" :class="['type-badge', `type-${selectedType2}`]">
+          {{ capitalize(selectedType2) }}
+        </span>
+        <span v-if="selectedRegion" class="region-badge">
+          📍 {{ capitalize(selectedRegion) }}
+        </span>
       </div>
     </div>
 
@@ -216,10 +262,41 @@ onMounted(() => fetchPokemon())
   display: flex;
   gap: 10px;
   align-items: center;
+  flex-wrap: wrap;
 }
 .filter-row .form-select {
   flex: 1;
+  min-width: 130px;
   max-width: 220px;
+}
+.filter-row .form-select:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.active-filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 8px 12px;
+  background: var(--bg-surface);
+  border-radius: var(--border-radius);
+  border: 1px solid var(--border-color);
+}
+.filter-plus {
+  font-weight: 700;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+.region-badge {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--accent-gold);
+  padding: 3px 10px;
+  background: rgba(240, 192, 64, 0.1);
+  border: 1px solid rgba(240, 192, 64, 0.3);
+  border-radius: 20px;
 }
 
 .results-count {
@@ -312,6 +389,11 @@ onMounted(() => fetchPokemon())
   .pokemon-grid {
     grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
     gap: 10px;
+  }
+  .filter-row .form-select {
+    min-width: 100px;
+    max-width: none;
+    flex: 1 1 calc(50% - 5px);
   }
 }
 </style>

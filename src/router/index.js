@@ -30,6 +30,12 @@ const routes = [
     name: 'profile',
     component: () => import('@/views/ProfileView.vue'),
     meta: { requiresAuth: true }
+  },
+  {
+    path: '/battle/:battleId',
+    name: 'battle-arena',
+    component: () => import('@/views/BattleArenaView.vue'),
+    meta: { requiresAuth: true }
   }
 ]
 
