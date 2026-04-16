@@ -42,12 +42,12 @@ function abrirBD() {
 }
 
 // Guarda una petición fallida
-function guardarEnIndexedDB(url, method, body) {
+function guardarEnIndexedDB(url, method, body, authHeader) {
   return abrirBD().then(db => {
     return new Promise((resolve, reject) => {
       const transaccion = db.transaction('peticionesFallidas', 'readwrite');
       const store = transaccion.objectStore('peticionesFallidas');
-      store.add({ url, method, body });
+      store.add({ url, method, body, authHeader });
       transaccion.oncomplete = () => resolve();
       transaccion.onerror = () => reject();
     });
@@ -91,10 +91,11 @@ self.addEventListener('fetch', (event) => {
     const respuestaOffline = fetch(event.request.clone())
       .catch((error) => {
         // "Cuando una peticion HTTP no se ejecute correctamente por falta de conexion"
+        const authHeader = event.request.headers.get('Authorization');
         return event.request.clone().text().then((bodyString) => {
-          
+
           // "guarde en indexedDB"
-          return guardarEnIndexedDB(event.request.url, event.request.method, bodyString);
+          return guardarEnIndexedDB(event.request.url, event.request.method, bodyString, authHeader);
           
         }).then(() => {
           
@@ -143,9 +144,12 @@ self.addEventListener('sync', (event) => {
       return Promise.all(peticiones.map((pet) => {
         
         // Las enviamos de nuevo a internet
+        const headers = { 'Content-Type': 'application/json' };
+        if (pet.authHeader) headers['Authorization'] = pet.authHeader;
+
         return fetch(pet.url, {
           method: pet.method,
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: pet.body
         }).then((respuestaServidor) => {
           
