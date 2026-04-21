@@ -1,10 +1,10 @@
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import api from '@/services/api'
 import PokemonPicker from '@/components/PokemonPicker.vue'
-import { connectSocket, getSocket } from '@/services/socket'
+import { connectSocket, getSocket, battleState, resetBattleState } from '@/services/socket'
 
 const authStore = useAuthStore()
 const router = useRouter()
@@ -175,18 +175,23 @@ const addFriend = async () => {
 }
 
 // --- BATALLAS EN TIEMPO REAL ---
-const battleStep = ref('select-team') // select-team, select-friend, waiting, loading
+// Los listeners de socket están en services/socket.js (globales).
+// Aquí solo manejamos el flujo visual del tab de batallas.
+const battleStep = ref('select-team') // select-team, select-friend
 const selectedMyTeam = ref(null)
 const selectedFriend = ref(null)
-const battleError = ref('')
-const battleMsg = ref('')
-
-// Invitación recibida
-const pendingInvitation = ref(null)
-const showInvitationModal = ref(false)
 const acceptTeamId = ref(null)
 
-let socket = null
+// UI derivada del estado global de batalla
+const battleError = computed(() => battleState.challengeError)
+const battleMsg = computed(() => battleState.challengeMsg)
+const pendingInvitation = computed(() => battleState.pendingInvitation)
+const showInvitationModal = computed(() => battleState.showInvitationModal)
+
+// Mientras esperamos respuesta o el server carga Pokémon mostramos la pantalla de espera
+const showWaitingScreen = computed(() =>
+  (battleState.challengeSent || battleState.loading) && battleStep.value !== 'select-team'
+)
 
 const selectTeamForBattle = (team) => {
   selectedMyTeam.value = team
@@ -195,91 +200,50 @@ const selectTeamForBattle = (team) => {
 
 const selectFriendForBattle = (friend) => {
   selectedFriend.value = friend
-  battleError.value = ''
-  battleMsg.value = ''
-  battleStep.value = 'waiting'
+  battleState.challengeError = ''
+  battleState.challengeMsg = ''
 
-  socket = getSocket()
-  if (!socket || !socket.connected) {
-    battleError.value = 'No hay conexión al servidor. Recarga la página.'
-    battleStep.value = 'select-friend'
+  const s = getSocket()
+  if (!s || !s.connected) {
+    battleState.challengeError = 'No hay conexión al servidor. Recarga la página.'
     return
   }
 
-  // Enviar reto
-  socket.emit('challenge-friend', {
+  // Enviar reto (la respuesta llega vía listeners globales y actualiza battleState)
+  s.emit('challenge-friend', {
     friendId: friend.id,
     myTeamId: selectedMyTeam.value.id
   })
 }
 
-const setupSocketListeners = () => {
-  socket = getSocket()
-  if (!socket) return
-
-  socket.on('challenge-sent', (data) => {
-    battleMsg.value = data.message
-  })
-
-  socket.on('challenge-rejected', (data) => {
-    battleError.value = data.message
-    battleStep.value = 'select-friend'
-    battleMsg.value = ''
-  })
-
-  socket.on('battle-invitation', (data) => {
-    pendingInvitation.value = data
-    showInvitationModal.value = true
-  })
-
-  socket.on('battle-loading', () => {
-    battleStep.value = 'loading'
-    battleMsg.value = 'Cargando datos de los Pokémon...'
-  })
-
-  socket.on('battle-start', (data) => {
-    // Guardar datos en sessionStorage ANTES de navegar
-    // para que BattleArenaView los encuentre al montar
-    sessionStorage.setItem(`battle_${data.battleId}`, JSON.stringify(data))
-    router.push(`/battle/${data.battleId}`)
-  })
-
-  socket.on('error-msg', (data) => {
-    battleError.value = data.message
-    if (battleStep.value === 'waiting' || battleStep.value === 'loading') {
-      battleStep.value = 'select-friend'
-    }
-  })
-}
-
 const acceptInvitation = () => {
-  if (!pendingInvitation.value || !acceptTeamId.value) return
+  if (!battleState.pendingInvitation || !acceptTeamId.value) return
 
-  socket = getSocket()
-  if (!socket) return
+  const s = getSocket()
+  if (!s) return
 
-  socket.emit('accept-challenge', {
-    challengeId: pendingInvitation.value.challengeId,
+  s.emit('accept-challenge', {
+    challengeId: battleState.pendingInvitation.challengeId,
     myTeamId: acceptTeamId.value
   })
 
-  showInvitationModal.value = false
-  battleStep.value = 'loading'
-  battleMsg.value = 'Cargando batalla...'
+  battleState.showInvitationModal = false
+  battleState.loading = true
+  battleState.challengeMsg = 'Cargando batalla...'
 }
 
 const rejectInvitation = () => {
-  if (!pendingInvitation.value) return
+  if (!battleState.pendingInvitation) return
 
-  socket = getSocket()
-  if (socket) {
-    socket.emit('reject-challenge', {
-      challengeId: pendingInvitation.value.challengeId
+  const s = getSocket()
+  if (s) {
+    s.emit('reject-challenge', {
+      challengeId: battleState.pendingInvitation.challengeId
     })
   }
 
-  showInvitationModal.value = false
-  pendingInvitation.value = null
+  battleState.showInvitationModal = false
+  battleState.pendingInvitation = null
   acceptTeamId.value = null
 }
 
@@ -287,8 +251,8 @@ const resetBattle = () => {
   battleStep.value = 'select-team'
   selectedMyTeam.value = null
   selectedFriend.value = null
-  battleError.value = ''
-  battleMsg.value = ''
+  acceptTeamId.value = null
+  resetBattleState()
 }
 
 const switchTab = (tab) => {
@@ -310,23 +274,10 @@ const pokemonImage = (id) =>
 
 onMounted(() => {
   fetchFavorites()
-  // Conectar socket y escuchar eventos
+  // Asegurar que el socket esté conectado (los listeners viven en services/socket.js)
   connectSocket()
-  // Pequeño delay para asegurar que el socket esté listo
-  setTimeout(() => {
-    setupSocketListeners()
-  }, 500)
-})
-
-onUnmounted(() => {
-  if (socket) {
-    socket.off('challenge-sent')
-    socket.off('challenge-rejected')
-    socket.off('battle-invitation')
-    socket.off('battle-loading')
-    socket.off('battle-start')
-    socket.off('error-msg')
-  }
+  // Si llega una invitación y no tenemos equipos cargados, precargarlos
+  fetchTeams()
 })
 </script>
 
@@ -487,8 +438,8 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <!-- Step 2: Select friend to challenge -->
-        <div v-if="battleStep === 'select-friend'">
+        <!-- Step 2: Select friend to challenge (o pantalla de espera) -->
+        <div v-if="battleStep === 'select-friend' && !showWaitingScreen">
           <h2 class="battle-step-title">2. Reta a un amigo</h2>
           <p class="battle-step-sub">Tu equipo: <strong>{{ selectedMyTeam?.name }}</strong></p>
           <p class="battle-step-sub" style="font-size:0.8rem; color: var(--text-muted);">Tu amigo debe estar conectado para recibir el reto</p>
@@ -506,20 +457,15 @@ onUnmounted(() => {
           <button @click="resetBattle" class="btn btn-secondary btn-sm" style="margin-top:16px;">← Volver</button>
         </div>
 
-        <!-- Waiting for opponent response -->
-        <div v-if="battleStep === 'waiting'" class="battle-waiting-screen">
+        <!-- Pantalla de espera (reto enviado o cargando datos) -->
+        <div v-if="showWaitingScreen" class="battle-waiting-screen">
           <div class="spinner"></div>
-          <h3>Esperando respuesta...</h3>
-          <p>Reto enviado a <strong>{{ selectedFriend?.email }}</strong></p>
-          <p style="font-size:0.8rem; color: var(--text-muted);">Tu amigo debe aceptar el reto para comenzar la batalla</p>
-          <button @click="resetBattle" class="btn btn-secondary btn-sm" style="margin-top:20px;">Cancelar</button>
-        </div>
-
-        <!-- Loading battle data -->
-        <div v-if="battleStep === 'loading'" class="battle-waiting-screen">
-          <div class="spinner"></div>
-          <h3>Preparando la batalla...</h3>
-          <p>Cargando datos de los Pokémon</p>
+          <h3 v-if="battleState.loading">Preparando la batalla...</h3>
+          <h3 v-else>Esperando respuesta...</h3>
+          <p v-if="battleState.loading">Cargando datos de los Pokémon</p>
+          <p v-else>Reto enviado a <strong>{{ selectedFriend?.email }}</strong></p>
+          <p v-if="!battleState.loading" style="font-size:0.8rem; color: var(--text-muted);">Tu amigo debe aceptar el reto para comenzar la batalla</p>
+          <button v-if="!battleState.loading" @click="resetBattle" class="btn btn-secondary btn-sm" style="margin-top:20px;">Cancelar</button>
         </div>
       </div>
 
