@@ -238,7 +238,9 @@ const setupSocketListeners = () => {
   })
 
   socket.on('battle-start', (data) => {
-    // Redirigir a la arena de batalla
+    // Guardar datos en sessionStorage ANTES de navegar
+    // para que BattleArenaView los encuentre al montar
+    sessionStorage.setItem(`battle_${data.battleId}`, JSON.stringify(data))
     router.push(`/battle/${data.battleId}`)
   })
 
